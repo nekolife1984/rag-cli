@@ -1,158 +1,238 @@
 # rag-cli
 
-Repository: https://github.com/nekolife1984/rag-cli
+ファイルをデータベースに登録し、検索クエリに対して **ヒットしたチャンクのリストだけ** を返すローカル RAG（検索）ツールです。LLM による回答文の生成は行いません。検索結果をそのまま使うことも、別のプログラムや LLM へ渡す材料にすることもできます。
 
-ファイルを DB に登録し、検索すると **ヒットしたチャンクのリストだけ** を返す CLI。
-AI による文章生成はしない（検索 = Retrieval まで）。
+- リポジトリ: https://github.com/nekolife1984/rag-cli
+- ライセンス: 未設定
 
-## 設計
+## 特徴
 
-| 項目 | 採用 | 理由 |
-|---|---|---|
-| 言語 | Python 3.10+ | 標準ライブラリだけでコアが動く |
-| DB | SQLite（単一ファイル） | セットアップ不要、持ち運びやすい |
-| 保存 | チャンク本文 + 埋め込みベクトル(float32 BLOB) | 検索はコサイン類似度の総当たり |
-| チャンク | 段落優先、500文字 / 重なり80文字 | 日本語文書の既定値、引数で変更可 |
-| 対応形式 | .txt .md .csv .json .docx（標準のみ）/ .pdf（要 pypdf） | |
+- **生成なし・検索専用**: 返すのはスコア付きのチャンク一覧のみ。出力は人間向けテキストと JSON の2形式
+- **依存が軽い**: コア（CLI・DB・MCP）は Python 標準ライブラリのみで動作する
+- **埋め込みは3方式から選択**: オフラインで即動く `hash`、意味検索の `sbert`、API の `openai`
+- **3つの利用形態**: 単発 CLI / 常駐サーバー（HTTP）/ MCP サーバー（stdio）
+- **日本語対応**: チャンク分割と埋め込みのいずれも日本語文書を前提に調整している
 
-### 埋め込みバックエンド（DBごとに1つ固定）
+## アーキテクチャ
 
-| backend | 中身 | 意味検索 | 追加インストール |
-|---|---|---|---|
-| `hash`（既定） | 文字 n-gram ハッシュ 2048次元 | △ キーワード寄り | なし（即動く・オフライン） |
-| `sbert` | sentence-transformers `intfloat/multilingual-e5-small` | ◎ 日本語対応 | `pip install sentence-transformers`（初回 約470MB DL） |
-| `openai` | `text-embedding-3-small` | ◎ | なし（要 `OPENAI_API_KEY`、従量課金） |
+```
+ファイル ──ingest──▶ ローダ ─▶ チャンク分割 ─▶ 埋め込み ─▶ SQLite
+                                                              │
+クエリ ───────────────────────────── 埋め込み ─▶ コサイン類似度で検索
+                                                              │
+                                            ヒットしたチャンクのリスト
+```
 
-> ベクトルはモデルごとに互換性がないため、DB には最初に使った backend が記録され、
-> 違う backend で取り込むとエラーになる。検索は取り込みと同じ backend を指定すること。
+| モジュール | 役割 |
+|---|---|
+| `rag_cli/cli.py` | CLI 本体（ingest / search / list / stats / remove / clear / serve / mcp） |
+| `rag_cli/loaders.py` | ファイル読み込み（txt / md / csv / json / docx、pdf は要 pypdf） |
+| `rag_cli/chunking.py` | 段落と Markdown 見出しを優先したチャンク分割 |
+| `rag_cli/embed.py` | 埋め込みバックエンド（hash / sbert / openai） |
+| `rag_cli/store.py` | SQLite への保存と総当たりコサイン検索 |
+| `rag_cli/server.py` | 常駐 HTTP サーバー（モデルをメモリに保持） |
+| `rag_cli/mcp_server.py` | MCP サーバー（stdio、JSON-RPC） |
+
+設計上の要点:
+
+- DB は SQLite の単一ファイル。チャンク本文と埋め込みベクトル（float32）を保存する
+- チャンクは既定で500文字、重なり80文字。`--chunk-size` / `--overlap` で変更できる
+- ベクトルはモデルごとに互換性がないため、DB には最初に使ったバックエンドが記録され、異なるバックエンドでの取り込みはエラーになる。検索は取り込みと同じバックエンドを使う
+
+## インストール
+
+要件: Python 3.10 以上
+
+```bash
+# このフォルダでそのまま使う（インストール不要）
+python3 -m rag_cli --help
+
+# `rag` コマンドとして入れる
+pip install -e .
+pip install -e ".[sbert]"   # 意味検索（sentence-transformers）を使う場合
+pip install -e ".[pdf]"     # PDF を読む場合
+```
 
 ## 使い方
 
-インストールなしで使う場合（このフォルダで）:
+### CLI
 
 ```bash
-cd rag-cli
 python3 -m rag_cli ingest examples/sample.md --db ./test.db
 python3 -m rag_cli search "観光列車の予約はいつから？" --db ./test.db
 python3 -m rag_cli search "ファンが止まったらどうする？" --db ./test.db --json
 python3 -m rag_cli list --db ./test.db
 python3 -m rag_cli stats --db ./test.db
 python3 -m rag_cli remove sample.md --db ./test.db
+python3 -m rag_cli clear --db ./test.db --yes
 ```
 
-コマンドとして入れる場合:
+| コマンド | 説明 |
+|---|---|
+| `ingest <file\|dir...>` | ファイルを取り込む。`-r` でフォルダを再帰処理。内容が同じファイルは自動でスキップし、変わっていれば差し替える（`--force` で強制再取り込み） |
+| `search "<query>"` | ヒットしたチャンクをスコア順に返す。`-k` 件数（既定5）、`--min-score` 下限、`--json` で JSON 出力 |
+| `list` | 登録済み文書の一覧 |
+| `stats` | 文書数・チャンク数・バックエンド・次元数 |
+| `remove <file>` | 指定した文書を DB から削除 |
+| `clear --yes` | DB の中身をすべて削除 |
 
-```bash
-pip install -e .            # `rag` コマンドが使えるようになる
-pip install -e ".[sbert]"   # 意味検索まで使う場合
-pip install -e ".[pdf]"     # PDF を読む場合
-rag ingest docs/ -r
-rag search "SageMaker のチューニング" -k 5
-```
-
-### 主な引数
-
-- `ingest <file|dir...> [-r] [--chunk-size 500] [--overlap 80] [--force]`
-  - 同じファイル（中身が同じ）は自動でスキップ、変わっていれば差し替え
-- `search "<query>" [-k 5] [--min-score 0.3] [--json]`
-  - 返り値はヒットしたチャンクのリストだけ（score / 出典ファイル / チャンク番号 / 文字位置 / 本文）
-  - `--json` で他プログラムからそのまま使える形になる
-- 共通: `--db rag.db`（環境変数 `RAG_DB`）、`--backend hash|sbert|openai`（環境変数 `RAG_BACKEND`）
-
-## 規模の目安と拡張ポイント
-
-- 総当たり検索のため、快適なのは数万チャンク程度まで。それを超えたら
-  `store.py` の検索層だけ sqlite-vec / LanceDB / Chroma に差し替えればよい
-  （CLI と取り込み側はそのまま使えるよう分離してある）。
-- 生成（Generation）を足したくなったら、search の JSON 出力を LLM に渡す薄い層を別コマンドにする想定。今は入れていない。
-
-## 意味検索（sbert）の使い方と実測（2026-11-10）
-
-```bash
-# 初回だけ: venv にインストール（CPU版 torch、約1.2GB）＋ モデルDL（約471MB）
-uv venv .venv --python 3.12
-uv pip install --python .venv/bin/python --torch-backend cpu sentence-transformers
-
-.venv/bin/python -m rag_cli ingest examples/sample.md --db ./sbert.db --backend sbert
-.venv/bin/python -m rag_cli search "ダイエットで目指している数値を教えて" --db ./sbert.db --backend sbert
-```
-
-実測比較（サンプル文書5チャンク、直接クエリ4問＋言い換えクエリ4問、`examples/compare_backends.py`）:
-
-| backend | 直接クエリ | 言い換えクエリ | 合計 |
-|---|---|---|---|
-| hash | 4/4 | 2/4 | 6/8 |
-| sbert (multilingual-e5-small, 384次元) | 4/4 | **4/4** | **8/8** |
-
-言い換え例: 「ネットワークストレージの冷却装置が止まった時の対処法」
-→ hash は外し、sbert は NAS ファン警告のチャンクが1位（score 0.870）。
-
-注意点:
-- sbert の score は全体的に高く出る（正解 0.87〜0.91 / 2位 0.76〜0.80 程度）。
-  `--min-score` のしきい値は backend ごとに別物と考え、sbert では 0.80 前後から調整すること。
-- CLI は起動のたびにモデルを読み込むため、このVMでは検索1回 約20秒（torch読込＋モデル読込が大半）。
-  頻繁に検索するなら常駐サーバー化するか、hash との使い分けが現実的。
-
-## 常駐サーバー（2026-11-10 導入）
-
-モデルを読みっぱなしにする HTTP サーバーを systemd サービス `rag-server` で常駐化した。
-起動のたびのモデル読込（約20秒）がなくなり、検索は実測 0.36〜1.5秒で返る。
-常駐コストはメモリ約810MB（torch＋モデル）。
-
-```bash
-# クライアントは通常の python3 でOK（torch不要）。--db を省くとサーバーの既定DB（sbert.db）を使う
-python3 -m rag_cli search "ダイエットで目指している数値を教えて" --server http://127.0.0.1:8765
-python3 -m rag_cli ingest <ファイル> --server http://127.0.0.1:8765
-export RAG_SERVER=http://127.0.0.1:8765   # 毎回 --server を付けたくない場合
-
-systemctl status rag-server               # 状態確認
-curl http://127.0.0.1:8765/health         # {"status":"ok", ...}
-```
-
-- API: `GET /health`、`GET /stats?db=`、`POST /search`、`POST /ingest`（JSON、127.0.0.1のみ・認証なし＝ローカル専用）
-- サーバー手動起動（systemd を使わない場合）: `.venv/bin/python -m rag_cli serve --host 127.0.0.1 --port 8765 --db ./sbert.db --backend sbert`
-- ユニット原稿は `rag-server.service`（このフォルダ）。モデルはキャッシュ済み前提で
-  `HF_HUB_OFFLINE=1` を付けてある（起動時に HF Hub へ接続しない。モデル未DLの環境では先に通常の ingest でDLすること）。
-- VM交換で /etc のユニットが消えた場合の復旧: `cp rag-server.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now rag-server`
-- 既存の見守りフック（service-watchdog、5分間隔）の対象に rag-server も追加済み。停止を検知したら原稿から復旧し、成功時は無報告・失敗時だけユーザーへ報告する。
-
-## MCP 対応（2026-11-10 導入）
-
-`rag mcp` で MCP サーバー（stdio、JSON-RPC）として起動できる。標準ライブラリのみの実装で追加依存なし。
-公開ツールは4つ: `rag_search` / `rag_ingest` / `rag_list` / `rag_stats`（いずれも結果はチャンクのリスト等のみ、生成なし）。
-
-2つのモード:
-- **ブリッジ（既定）**: 常駐サーバー（http://127.0.0.1:8765）へ中継。MCPプロセス自体は軽く、起動即時・検索は常駐モデルで高速。
-- **直接（`--direct`）**: このプロセス内でバックエンドを読む。常駐サーバーがない環境用で、MCPホストがプロセスを維持するので sbert の読込はセッション初回だけ。
-
-クライアント設定例:
+検索結果（JSON）の形式:
 
 ```json
-// Claude Desktop / Claude Code などの mcpServers 形式
+[{"chunk_id": 2, "source": "/path/to/sample.md", "source_name": "sample.md",
+  "chunk_index": 1, "char_start": 61, "char_end": 164, "score": 0.8713,
+  "text": "## 渓谷観光列車の予約について\n\n渓谷を走る観光列車は、川沿いの景色を楽しめる人気の列車である。…"}]
+```
+
+### 常駐サーバー（HTTP）
+
+sbert はプロセス起動のたびにモデルを読み込むため、単発 CLI では検索1回に時間がかかります。常駐サーバーはモデルをメモリに保持し、HTTP で検索と取り込みを受け付けます。
+
+```bash
+# 手動起動
+.venv/bin/python -m rag_cli serve --host 127.0.0.1 --port 8765 --db ./sbert.db --backend sbert
+
+# クライアント（通常の python3 でよい。--db を省くとサーバーの既定 DB を使う）
+python3 -m rag_cli search "ダイエットで目指している数値を教えて" --server http://127.0.0.1:8765
+python3 -m rag_cli ingest <ファイル> --server http://127.0.0.1:8765
+export RAG_SERVER=http://127.0.0.1:8765   # 設定すると --server を省略できる
+```
+
+| エンドポイント | 説明 |
+|---|---|
+| `GET /health` | 稼働状態、バックエンド、次元数、既定 DB |
+| `GET /stats?db=` | DB の統計 |
+| `GET /list?db=` | 登録済み文書の一覧 |
+| `POST /search` | `{"query", "db?", "top_k?", "min_score?"}` → `{"results": [...]}` |
+| `POST /ingest` | `{"paths", "db?", "chunk_size?", "overlap?", "force?", "recursive?"}` |
+
+- バインドは 127.0.0.1 のみ、認証なし。ローカル専用であり、外部には公開しないこと
+- systemd で常駐させる場合のユニット例が `rag-server.service`。モデルをキャッシュから読む前提のため `HF_HUB_OFFLINE=1` を付けてある（未ダウンロードの環境では、先に通常の ingest でモデルを取得すること）
+
+### MCP サーバー
+
+`rag mcp` で MCP（Model Context Protocol）サーバーとして起動します。stdio トランスポート、標準ライブラリのみの実装です。
+
+| ツール | 引数 | 返り値 |
+|---|---|---|
+| `rag_search` | `query`, `top_k?`, `min_score?`, `db?` | ヒットしたチャンクのリスト |
+| `rag_ingest` | `paths`, `db?`, `chunk_size?`, `overlap?`, `force?`, `recursive?` | ファイルごとの取り込み結果 |
+| `rag_list` | `db?` | 登録済み文書の一覧 |
+| `rag_stats` | `db?` | DB の統計 |
+
+モードは2つあります。
+
+- **ブリッジ（既定）**: 常駐サーバー（`http://127.0.0.1:8765`）へ中継する。MCP プロセス自体にモデル読み込みがなく、軽量で起動が速い
+- **直接（`--direct`）**: このプロセス内でバックエンドを読み込む。常駐サーバーがない環境用。MCP ホストがプロセスを維持するため、モデル読み込みはセッションの初回だけになる
+
+クライアント設定例（リポジトリのパスは環境に合わせて読み替えること）:
+
+```json
 {"mcpServers": {"rag": {
   "command": "/usr/bin/python3",
   "args": ["-m", "rag_cli", "mcp"],
-  "cwd": "/home/hatch/workspace/rag-cli",
-  "env": {"PYTHONPATH": "/home/hatch/workspace/rag-cli"}
+  "cwd": "/path/to/rag-cli",
+  "env": {"PYTHONPATH": "/path/to/rag-cli"}
 }}}
 ```
 
 ```yaml
-# Hermes (~/.hermes/config.yaml の mcp_servers)
+# Hermes の ~/.hermes/config.yaml
 mcp_servers:
   rag:
     command: /usr/bin/python3
     args: ["-m", "rag_cli", "mcp"]
     env:
-      PYTHONPATH: /home/hatch/workspace/rag-cli
-    # ブリッジモードなので DB は常駐サーバーの既定（sbert.db）が使われる
+      PYTHONPATH: /path/to/rag-cli
 ```
 
-動作確認: `python3 examples/mcp_test.py`（initialize → tools/list → tools/call を一通り実行。ブリッジモード実測 全体1.4秒、言い換えクエリでも正解チャンク1位）
+## 埋め込みバックエンド
+
+| backend | 中身 | 意味検索 | 追加要件 |
+|---|---|---|---|
+| `hash`（既定） | 文字 n-gram（2〜4）のハッシュ、2048次元 | △ キーワード寄り | なし（オフラインで即動作） |
+| `sbert` | sentence-transformers `intfloat/multilingual-e5-small`、384次元 | ◎ 日本語対応 | `sentence-transformers`（モデル約471MB、torch を含む環境は約1.2GB） |
+| `openai` | `text-embedding-3-small`、1536次元 | ◎ | 環境変数 `OPENAI_API_KEY`（従量課金） |
+
+sbert の導入例:
+
+```bash
+uv venv .venv --python 3.12
+uv pip install --python .venv/bin/python --torch-backend cpu sentence-transformers
+.venv/bin/python -m rag_cli ingest examples/sample.md --db ./sbert.db --backend sbert
+```
+
+スコアの読み方:
+
+- スコアはコサイン類似度だが、絶対値の水準はバックエンドで大きく異なる。hash では正解が 0.06〜0.28 程度、sbert では 0.87〜0.91 程度（2位でも 0.76〜0.80 程度）に出る
+- `--min-score` のしきい値はバックエンドごとに別々に調整すること
+
+## 設定
+
+| 環境変数 | 対応する引数 | 内容 |
+|---|---|---|
+| `RAG_DB` | `--db` | DB ファイル（既定 `rag.db`） |
+| `RAG_BACKEND` | `--backend` | `hash` / `sbert` / `openai`（既定 `hash`） |
+| `RAG_SERVER` | `--server` | 常駐サーバーの URL |
+| `RAG_MODEL` | `--model` | sbert / openai のモデル名 |
+| `OPENAI_API_KEY` | — | openai バックエンド用 |
+
+## 性能と規模
+
+バックエンド比較（サンプル文書5チャンク、直接クエリ4問＋言い換えクエリ4問で1位正解率を測定。再現手順は `examples/compare_backends.py`）:
+
+| backend | 直接クエリ | 言い換えクエリ | 合計 |
+|---|---|---|---|
+| hash | 4/4 | 2/4 | 6/8 |
+| sbert | 4/4 | 4/4 | 8/8 |
+
+言い換えクエリの例: 「ネットワークストレージの冷却装置が止まった時の対処法」では、本文に該当語を含まない NAS ファン警告のチャンクを、sbert は1位（0.870）で返し、hash は外した。
+
+応答時間とリソース（小規模 VM での参考値）:
+
+| 形態 | 検索1回 |
+|---|---|
+| 単発 CLI（sbert） | 約20秒（大半はモデル読み込み） |
+| 常駐サーバー経由 | 0.36〜1.5秒 |
+| 常駐サーバーのメモリ使用量 | 約810MB |
+
+規模の目安と拡張:
+
+- 検索は総当たりのため、快適なのは数万チャンク程度まで
+- それを超える場合は `store.py` の検索層だけを sqlite-vec / LanceDB / Chroma 等に差し替えられるよう、保存と検索を分離してある
+- 回答生成を足す場合は、search の JSON 出力を LLM に渡す薄い層を別コマンドとして追加する想定であり、本体には含めていない
+
+## ファイル構成
+
+```
+rag-cli/
+├── README.md
+├── pyproject.toml          # rag コマンドと任意依存（sbert / pdf）の定義
+├── rag-server.service      # systemd ユニットの例
+├── rag_cli/
+│   ├── cli.py              # CLI 本体
+│   ├── loaders.py          # ファイル読み込み
+│   ├── chunking.py         # チャンク分割
+│   ├── embed.py            # 埋め込みバックエンド
+│   ├── store.py            # SQLite 保存・検索
+│   ├── server.py           # 常駐 HTTP サーバー
+│   └── mcp_server.py       # MCP サーバー
+└── examples/
+    ├── sample.md           # 動作確認用の架空のサンプル文書
+    ├── compare_backends.py # バックエンド比較スクリプト
+    └── mcp_test.py         # MCP クライアントのテストスクリプト
+```
 
 ## テスト
 
 ```bash
+# スモークテスト（hash、追加インストール不要）
 python3 -m rag_cli ingest examples/sample.md --db /tmp/test.db --force
 python3 -m rag_cli search "体重の目標は何キロ？" --db /tmp/test.db
+
+# バックエンド比較（sbert は .venv の python で実行）
+.venv/bin/python examples/compare_backends.py
+
+# MCP テスト（ブリッジモードは常駐サーバーが必要）
+python3 examples/mcp_test.py
 ```
