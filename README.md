@@ -11,6 +11,7 @@
 - **依存が軽い**: コア（CLI・DB・MCP）は Python 標準ライブラリのみで動作する
 - **埋め込みは3方式から選択**: オフラインで即動く `hash`、意味検索の `sbert`、API の `openai`
 - **ハイブリッド検索**: ベクトル検索と BM25 キーワード検索を RRF で融合するモードを用意。固有名詞や数値に強いキーワード検索と、言い換えに強いベクトル検索の弱点を補い合う
+- **対応形式**: txt / md / csv / json / html / docx / xlsx / xlsm（標準ライブラリのみ）、pdf（要 pypdf）。旧形式の .xls（バイナリ）には未対応。Excel はシートごとに `# Sheet: <シート名>` を付け、日付・時刻セルのシリアル値を ISO 日付に変換して取り込む
 - **3つの利用形態**: 単発 CLI / 常駐サーバー（HTTP）/ MCP サーバー（stdio）
 - **日本語対応**: チャンク分割と埋め込みのいずれも日本語文書を前提に調整している
 
@@ -27,7 +28,7 @@
 | モジュール | 役割 |
 |---|---|
 | `rag_cli/cli.py` | CLI 本体（ingest / search / list / stats / remove / clear / serve / mcp） |
-| `rag_cli/loaders.py` | ファイル読み込み（txt / md / csv / json / docx、pdf は要 pypdf） |
+| `rag_cli/loaders.py` | ファイル読み込み（txt / md / csv / json / html / docx / xlsx / xlsm、pdf は要 pypdf） |
 | `rag_cli/chunking.py` | 段落と Markdown 見出しを優先したチャンク分割 |
 | `rag_cli/embed.py` | 埋め込みバックエンド（hash / sbert / openai） |
 | `rag_cli/store.py` | SQLite への保存と総当たりコサイン検索 |
@@ -73,6 +74,9 @@ python3 -m rag_cli clear --db ./test.db --yes
 |---|---|
 | `ingest <file\|dir...>` | ファイルを取り込む。`-r` でフォルダを再帰処理。内容が同じファイルは自動でスキップし、変わっていれば差し替える（`--force` で強制再取り込み） |
 | `search "<query>"` | ヒットしたチャンクをスコア順に返す。`-k` 件数（既定5）、`--min-score` 下限、`--mode` 検索モード、`--json` で JSON 出力 |
+| `get <chunk_id>` | 検索結果の `chunk_id` を指定して、そのチャンク1件（出典・位置・全文）を取得。存在しない ID はエラー（終了コード1） |
+| `context <chunk_id>` | そのチャンクと、同じ文書内での前後のチャンクを取得。`--before N` / `--after N` で前後の個数を指定（既定は各1）。文書の端では取れた分だけ返す |
+| `fulltext <doc_id\|path\|name>` | 元ファイルの全文（抽出テキスト）を返す。`--chunk-id N` でチャンクから文書を引くこともできる。DB はチャンクしか保持しないため、実ファイルをその場で読み直す。取り込み後にファイルが変わっていれば警告し、現在の内容を返す。ファイルが消えている場合はエラー |
 | `list` | 登録済み文書の一覧 |
 | `stats` | 文書数・チャンク数・バックエンド・次元数 |
 | `remove <file>` | 指定した文書を DB から削除 |
@@ -119,6 +123,9 @@ export RAG_SERVER=http://127.0.0.1:8765   # 設定すると --server を省略�
 | `GET /health` | 稼働状態、バックエンド、次元数、既定 DB |
 | `GET /stats?db=` | DB の統計 |
 | `GET /list?db=` | 登録済み文書の一覧 |
+| `GET /chunk?id=&db=` | `chunk_id` 指定でチャンク1件を返す。存在しなければ 404 |
+| `GET /context?id=&before=&after=&db=` | チャンクと同一文書内の前後を `{"target", "before", "after"}` で返す。存在しなければ 404 |
+| `GET /fulltext?target=&chunk_id=&db=` | 元ファイルの全文を `{doc_id, source, chars, changed_since_ingest, text, ...}` で返す。文書が無い・ファイルが消えている場合は 404 |
 | `POST /search` | `{"query", "db?", "top_k?", "min_score?", "mode?"}` → `{"results": [...], "mode": "..."}` |
 | `POST /ingest` | `{"paths", "db?", "chunk_size?", "overlap?", "force?", "recursive?"}` |
 
@@ -132,6 +139,9 @@ export RAG_SERVER=http://127.0.0.1:8765   # 設定すると --server を省略�
 | ツール | 引数 | 返り値 |
 |---|---|---|
 | `rag_search` | `query`, `top_k?`, `min_score?`, `mode?`, `db?` | ヒットしたチャンクのリスト |
+| `rag_get_chunk` | `chunk_id`, `db?` | 指定チャンク1件（出典・位置・全文） |
+| `rag_get_context` | `chunk_id`, `before?`, `after?`, `db?` | チャンクと同一文書内の前後（`{target, before, after}`） |
+| `rag_fulltext` | `target?`（doc_id・パス・ファイル名）, `chunk_id?`, `db?` | 元ファイルの全文（実ファイルを読み直し、変更検知フラグ付き） |
 | `rag_ingest` | `paths`, `db?`, `chunk_size?`, `overlap?`, `force?`, `recursive?` | ファイルごとの取り込み結果 |
 | `rag_list` | `db?` | 登録済み文書の一覧 |
 | `rag_stats` | `db?` | DB の統計 |

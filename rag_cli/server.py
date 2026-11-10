@@ -7,6 +7,9 @@ Binds to 127.0.0.1 only, no auth -- local use only.
 Endpoints (JSON in/out):
   GET  /health                 -> {status, backend, dim, default_db, uptime_sec}
   GET  /stats?db=<path>        -> store stats
+  GET  /chunk?id=<chunk_id>&db=<path>  -> {chunk} or 404
+  GET  /context?id=<chunk_id>&before=<n>&after=<n>&db=<path> -> {target, before, after} or 404
+  GET  /fulltext?target=<doc_id|path|name>&chunk_id=<id>&db=<path> -> {doc_id, source, ..., text} or 404
   POST /search  {query, db?, top_k?, min_score?}        -> {results: [chunk, ...]}
   POST /ingest  {paths, db?, chunk_size?, overlap?, force?, recursive?}
                                -> {files: [{path, chunks, skipped}], total_chunks}
@@ -101,6 +104,29 @@ class RagServer:
         finally:
             store.conn.close()
 
+    def get_chunk(self, db: str | None, chunk_id: int) -> dict | None:
+        store = self._store(db)
+        try:
+            return store.get_chunk(chunk_id)
+        finally:
+            store.conn.close()
+
+    def fulltext(self, db: str | None, target=None, chunk_id=None) -> dict:
+        store = self._store(db)
+        try:
+            return store.fulltext(target=target, chunk_id=chunk_id)
+        except (LookupError, FileNotFoundError) as e:
+            return {"error": str(e), "not_found": True}
+        finally:
+            store.conn.close()
+
+    def get_context(self, db: str | None, chunk_id: int, before: int, after: int) -> dict | None:
+        store = self._store(db)
+        try:
+            return store.get_context(chunk_id, before=before, after=after)
+        finally:
+            store.conn.close()
+
     def health(self) -> dict:
         return {
             "status": "ok",
@@ -142,6 +168,38 @@ def make_handler(rag: RagServer):
                 elif url.path == "/list":
                     db = parse_qs(url.query).get("db", [None])[0]
                     self._send(200, rag.list_documents(db))
+                elif url.path == "/chunk":
+                    qs = parse_qs(url.query)
+                    chunk_id = int(qs["id"][0])
+                    chunk = rag.get_chunk(qs.get("db", [None])[0], chunk_id)
+                    if chunk is None:
+                        self._send(404, {"error": f"chunk not found: id={chunk_id}"})
+                    else:
+                        self._send(200, {"chunk": chunk})
+                elif url.path == "/fulltext":
+                    qs = parse_qs(url.query)
+                    cid = qs.get("chunk_id", [None])[0]
+                    res = rag.fulltext(
+                        qs.get("db", [None])[0],
+                        target=qs.get("target", [None])[0],
+                        chunk_id=int(cid) if cid else None,
+                    )
+                    if res.get("not_found"):
+                        self._send(404, {"error": res["error"]})
+                    else:
+                        self._send(200, res)
+                elif url.path == "/context":
+                    qs = parse_qs(url.query)
+                    chunk_id = int(qs["id"][0])
+                    ctx = rag.get_context(
+                        qs.get("db", [None])[0], chunk_id,
+                        before=int(qs.get("before", ["1"])[0]),
+                        after=int(qs.get("after", ["1"])[0]),
+                    )
+                    if ctx is None:
+                        self._send(404, {"error": f"chunk not found: id={chunk_id}"})
+                    else:
+                        self._send(200, ctx)
                 else:
                     self._send(404, {"error": "not found"})
             except Exception as e:  # keep the server alive on a bad request

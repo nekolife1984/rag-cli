@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rag-cli"
-version = "0.3.0"
+version = "0.3.4"
 description = "Local RAG retrieval CLI: ingest files, search returns hit chunks only (no generation)"
 requires-python = ">=3.10"
 dependencies = []

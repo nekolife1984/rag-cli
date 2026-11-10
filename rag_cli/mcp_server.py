@@ -13,6 +13,9 @@ stdout carries ONLY protocol messages; everything else goes to stderr.
 
 Tools (results are hit chunks only -- no generation, same as the CLI):
   rag_search {query, top_k?, min_score?, db?}
+  rag_get_chunk {chunk_id, db?}
+  rag_get_context {chunk_id, before?, after?, db?}
+  rag_fulltext {target?, chunk_id?, db?}
   rag_ingest {paths, db?, chunk_size?, overlap?, force?, recursive?}
   rag_list   {db?}
   rag_stats  {db?}
@@ -25,7 +28,7 @@ import urllib.parse
 import urllib.request
 
 SUPPORTED_PROTOCOLS = ["2024-11-05", "2025-03-26", "2025-06-18"]
-SERVER_INFO = {"name": "rag-cli", "version": "0.3.0"}
+SERVER_INFO = {"name": "rag-cli", "version": "0.3.4"}
 
 TOOLS = [
     {
@@ -43,6 +46,50 @@ TOOLS = [
                 "db": {"type": "string", "description": "Optional DB path (default: server default DB)"},
             },
             "required": ["query"],
+        },
+    },
+    {
+        "name": "rag_get_chunk",
+        "description": "Fetch one chunk by its chunk_id (as returned by rag_search): "
+                       "source file, chunk index, char range and full text.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "chunk_id": {"type": "integer", "description": "Chunk ID from a rag_search result"},
+                "db": {"type": "string", "description": "Optional DB path (default: server default DB)"},
+            },
+            "required": ["chunk_id"],
+        },
+    },
+    {
+        "name": "rag_get_context",
+        "description": "Fetch a chunk plus its neighboring chunks from the same document "
+                       "(before/after counts by chunk position). Returns {target, before, after} "
+                       "in document order within each list.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "chunk_id": {"type": "integer", "description": "Center chunk ID from a rag_search result"},
+                "before": {"type": "integer", "default": 1, "minimum": 0, "description": "How many preceding chunks"},
+                "after": {"type": "integer", "default": 1, "minimum": 0, "description": "How many following chunks"},
+                "db": {"type": "string", "description": "Optional DB path (default: server default DB)"},
+            },
+            "required": ["chunk_id"],
+        },
+    },
+    {
+        "name": "rag_fulltext",
+        "description": "Return the full extracted text of a source document, re-read from the "
+                       "file on disk. Identify the document by target (doc_id, source path or "
+                       "file name) or by chunk_id of any of its chunks. The result flags "
+                       "changed_since_ingest if the file differs from ingest time.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": ["string", "integer"], "description": "Document id, source path, or file name"},
+                "chunk_id": {"type": "integer", "description": "Resolve the document via this chunk id"},
+                "db": {"type": "string", "description": "Optional DB path (default: server default DB)"},
+            },
         },
     },
     {
@@ -115,6 +162,59 @@ class BridgeOps:
             "force": args.get("force", False), "recursive": args.get("recursive", False),
         })
 
+    def get_chunk(self, args: dict) -> dict:
+        import urllib.error
+
+        url = self.base + "/chunk?id=" + str(int(args["chunk_id"]))
+        if args.get("db"):
+            url += "&db=" + urllib.parse.quote(args["db"])
+        try:
+            with urllib.request.urlopen(url, timeout=30) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                raise ValueError(f"chunk not found: id={args['chunk_id']}") from e
+            raise
+
+    def get_context(self, args: dict) -> dict:
+        import urllib.error
+
+        url = (self.base + "/context?id=" + str(int(args["chunk_id"]))
+               + "&before=" + str(int(args.get("before", 1)))
+               + "&after=" + str(int(args.get("after", 1))))
+        if args.get("db"):
+            url += "&db=" + urllib.parse.quote(args["db"])
+        try:
+            with urllib.request.urlopen(url, timeout=30) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                raise ValueError(f"chunk not found: id={args['chunk_id']}") from e
+            raise
+
+    def fulltext(self, args: dict) -> dict:
+        import urllib.error
+
+        params = {}
+        if args.get("target") is not None:
+            params["target"] = str(args["target"])
+        if args.get("chunk_id") is not None:
+            params["chunk_id"] = str(int(args["chunk_id"]))
+        if args.get("db"):
+            params["db"] = args["db"]
+        url = self.base + "/fulltext?" + urllib.parse.urlencode(params)
+        try:
+            with urllib.request.urlopen(url, timeout=30) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                try:
+                    msg = json.loads(e.read()).get("error", "not found")
+                except Exception:
+                    msg = "not found"
+                raise ValueError(msg) from e
+            raise
+
     def list_documents(self, args: dict) -> dict:
         return self._get("/list", args.get("db"))
 
@@ -142,6 +242,23 @@ class DirectOps:
             "chunk_size": args.get("chunk_size", 500), "overlap": args.get("overlap", 80),
             "force": args.get("force", False), "recursive": args.get("recursive", False),
         })
+
+    def get_chunk(self, args: dict) -> dict:
+        chunk = self.rag.get_chunk(args.get("db"), int(args["chunk_id"]))
+        if chunk is None:
+            raise ValueError(f"chunk not found: id={args['chunk_id']}")
+        return {"chunk": chunk}
+
+    def get_context(self, args: dict) -> dict:
+        ctx = self.rag.get_context(args.get("db"), int(args["chunk_id"]),
+                                   int(args.get("before", 1)), int(args.get("after", 1)))
+        if ctx is None:
+            raise ValueError(f"chunk not found: id={args['chunk_id']}")
+        return ctx
+
+    def fulltext(self, args: dict) -> dict:
+        return self.rag.fulltext(args.get("db"), target=args.get("target"),
+                                 chunk_id=args.get("chunk_id"))
 
     def list_documents(self, args: dict) -> dict:
         return self.rag.list_documents(args.get("db"))
@@ -194,6 +311,12 @@ class McpServer:
             if name == "rag_search":
                 out = self.ops.search(args)
                 payload = {"results": out["results"]}
+            elif name == "rag_get_chunk":
+                payload = self.ops.get_chunk(args)
+            elif name == "rag_get_context":
+                payload = self.ops.get_context(args)
+            elif name == "rag_fulltext":
+                payload = self.ops.fulltext(args)
             elif name == "rag_ingest":
                 out = self.ops.ingest(args)
                 if "error" in out:

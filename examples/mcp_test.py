@@ -53,6 +53,32 @@ def main():
     else:
         assert top["chunk_index"] == 4, "expected NAS fan chunk #4"
 
+    r = request("tools/call", {"name": "rag_get_chunk", "arguments": {"chunk_id": top["chunk_id"]}})
+    got = json.loads(r["result"]["content"][0]["text"])["chunk"]
+    assert got["chunk_id"] == top["chunk_id"] and got["text"] == top["text"]
+    print(f"rag_get_chunk: chunk_id={got['chunk_id']} text matches search result")
+
+    r = request("tools/call", {"name": "rag_get_chunk", "arguments": {"chunk_id": 999999}})
+    assert r["result"]["isError"], "missing chunk must be an error"
+    print("rag_get_chunk (missing id): isError as expected")
+
+    r = request("tools/call", {"name": "rag_get_context", "arguments": {
+        "chunk_id": top["chunk_id"], "before": 2, "after": 1}})
+    ctx = json.loads(r["result"]["content"][0]["text"])
+    assert ctx["target"]["chunk_id"] == top["chunk_id"]
+    idxs = [c["chunk_index"] for c in ctx["before"]]
+    assert idxs == sorted(idxs), "before must be in document order"
+    print(f"rag_get_context: target idx={ctx['target']['chunk_index']} "
+          f"before={idxs} after={[c['chunk_index'] for c in ctx['after']]}")
+
+    r = request("tools/call", {"name": "rag_fulltext", "arguments": {"chunk_id": top["chunk_id"]}})
+    ft = json.loads(r["result"]["content"][0]["text"])
+    # note: chunk text joins paragraphs with "\n\n", so it is not always a
+    # verbatim substring of the raw file -- check a body sentence instead.
+    assert ft["source_name"] == "sample.md" and ft["chars"] > 0
+    assert "ファン停止のアラートが連続して届いた場合は" in ft["text"]
+    print(f"rag_fulltext: doc_id={ft['doc_id']} chars={ft['chars']} changed={ft['changed_since_ingest']}")
+
     r = request("tools/call", {"name": "rag_stats", "arguments": {}})
     print("rag_stats:", json.loads(r["result"]["content"][0]["text"]))
 

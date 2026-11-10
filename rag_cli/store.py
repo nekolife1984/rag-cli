@@ -143,6 +143,100 @@ class Store:
             "SELECT id, source_path, source_name, ingested_at, chunk_count FROM documents ORDER BY id"
         ).fetchall()]
 
+    def get_chunk(self, chunk_id: int):
+        row = self.conn.execute(
+            "SELECT c.id, c.doc_id, c.chunk_index, c.char_start, c.char_end, c.text, d.source_path "
+            "FROM chunks c JOIN documents d ON d.id = c.doc_id WHERE c.id = ?",
+            (chunk_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "chunk_id": row["id"],
+            "doc_id": row["doc_id"],
+            "source": row["source_path"],
+            "source_name": Path(row["source_path"]).name,
+            "chunk_index": row["chunk_index"],
+            "char_start": row["char_start"],
+            "char_end": row["char_end"],
+            "text": row["text"],
+        }
+
+    def get_context(self, chunk_id: int, before: int = 1, after: int = 1):
+        """Target chunk plus neighboring chunks from the SAME document.
+
+        Neighbors are selected by chunk_index distance; at document edges
+        fewer chunks are returned. Returns None if the chunk does not exist.
+        """
+        target = self.get_chunk(chunk_id)
+        if target is None:
+            return None
+        idx, doc_id = target["chunk_index"], target["doc_id"]
+        rows = self.conn.execute(
+            "SELECT c.id, c.doc_id, c.chunk_index, c.char_start, c.char_end, c.text, d.source_path "
+            "FROM chunks c JOIN documents d ON d.id = c.doc_id "
+            "WHERE c.doc_id = ? AND c.chunk_index BETWEEN ? AND ? ORDER BY c.chunk_index",
+            (doc_id, idx - max(0, before), idx + max(0, after)),
+        ).fetchall()
+        chunks = [{
+            "chunk_id": r["id"], "doc_id": r["doc_id"], "source": r["source_path"],
+            "source_name": Path(r["source_path"]).name, "chunk_index": r["chunk_index"],
+            "char_start": r["char_start"], "char_end": r["char_end"], "text": r["text"],
+        } for r in rows]
+        return {
+            "target": target,
+            "before": [c for c in chunks if c["chunk_index"] < idx],
+            "after": [c for c in chunks if c["chunk_index"] > idx],
+        }
+
+    def find_document(self, target):
+        """Find a document row by id, source path, or source name."""
+        t = str(target)
+        if t.isdigit():
+            row = self.conn.execute("SELECT * FROM documents WHERE id=?", (int(t),)).fetchone()
+            if row is not None:
+                return dict(row)
+        row = self.conn.execute(
+            "SELECT * FROM documents WHERE source_path=? OR source_name=?",
+            (str(Path(t).resolve()), t),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def fulltext(self, target=None, chunk_id=None) -> dict:
+        """Full extracted text of a source document, re-read from the file on disk.
+
+        The DB stores chunks only, so the text is loaded fresh via the same
+        loader used at ingest time. Raises LookupError if the document (or
+        chunk) is unknown, FileNotFoundError if the file is gone.
+        """
+        from .loaders import load_file
+
+        if chunk_id is not None:
+            chunk = self.get_chunk(int(chunk_id))
+            if chunk is None:
+                raise LookupError(f"chunk not found: id={chunk_id}")
+            doc = self.find_document(chunk["doc_id"])
+        elif target is not None:
+            doc = self.find_document(target)
+        else:
+            raise ValueError("fulltext needs a target document or a chunk_id")
+        if doc is None:
+            raise LookupError(f"document not found: {target}")
+        path = Path(doc["source_path"])
+        if not path.is_file():
+            raise FileNotFoundError(f"source file not found: {path}")
+        text = load_file(path)
+        return {
+            "doc_id": doc["id"],
+            "source": doc["source_path"],
+            "source_name": doc["source_name"],
+            "ingested_at": doc["ingested_at"],
+            "chunk_count": doc["chunk_count"],
+            "chars": len(text),
+            "changed_since_ingest": self.file_hash(path) != doc["file_hash"],
+            "text": text,
+        }
+
     def stats(self):
         docs = self.conn.execute("SELECT COUNT(*) c FROM documents").fetchone()["c"]
         chunks = self.conn.execute("SELECT COUNT(*) c FROM chunks").fetchone()["c"]

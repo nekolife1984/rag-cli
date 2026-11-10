@@ -29,6 +29,101 @@ def _server_post(server: str, route: str, payload: dict) -> dict:
         return json.loads(resp.read())
 
 
+def _server_get(server: str, route: str, params: dict) -> tuple[int, dict]:
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    qs = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
+    url = server.rstrip("/") + route + ("?" + qs if qs else "")
+    try:
+        with urllib.request.urlopen(url) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read())
+        except Exception:
+            return e.code, {"error": str(e)}
+
+
+def cmd_get(args) -> int:
+    if getattr(args, "server", None):
+        status, resp = _server_get(args.server, "/chunk", {
+            "id": args.chunk_id, "db": None if args.db == DEFAULT_DB else args.db,
+        })
+        if status != 200 or "chunk" not in resp:
+            print(f"error: {resp.get('error', f'HTTP {status}')}", file=sys.stderr)
+            return 1
+        chunk = resp["chunk"]
+    else:
+        chunk = Store(args.db).get_chunk(args.chunk_id)
+        if chunk is None:
+            print(f"error: chunk not found: id={args.chunk_id}", file=sys.stderr)
+            return 1
+    if args.json:
+        print(json.dumps(chunk, ensure_ascii=False, indent=2))
+    else:
+        print(f"chunk_id={chunk['chunk_id']}  {chunk['source_name']}  chunk#{chunk['chunk_index']}  chars {chunk['char_start']}-{chunk['char_end']}")
+        print(chunk["text"])
+    return 0
+
+
+def cmd_context(args) -> int:
+    if getattr(args, "server", None):
+        status, resp = _server_get(args.server, "/context", {
+            "id": args.chunk_id, "before": args.before, "after": args.after,
+            "db": None if args.db == DEFAULT_DB else args.db,
+        })
+        if status != 200 or "target" not in resp:
+            print(f"error: {resp.get('error', f'HTTP {status}')}", file=sys.stderr)
+            return 1
+        ctx = resp
+    else:
+        ctx = Store(args.db).get_context(args.chunk_id, before=args.before, after=args.after)
+        if ctx is None:
+            print(f"error: chunk not found: id={args.chunk_id}", file=sys.stderr)
+            return 1
+    if args.json:
+        print(json.dumps(ctx, ensure_ascii=False, indent=2))
+        return 0
+    ordered = ctx["before"] + [ctx["target"]] + ctx["after"]
+    for c in ordered:
+        mark = ">>" if c["chunk_id"] == ctx["target"]["chunk_id"] else "  "
+        print(f"{mark} chunk_id={c['chunk_id']}  {c['source_name']}  chunk#{c['chunk_index']}  chars {c['char_start']}-{c['char_end']}")
+        print(c["text"])
+        print("---")
+    return 0
+
+
+def cmd_fulltext(args) -> int:
+    if args.target is None and args.chunk_id is None:
+        print("error: give a document (id, path or name) or --chunk-id", file=sys.stderr)
+        return 1
+    if getattr(args, "server", None):
+        status, resp = _server_get(args.server, "/fulltext", {
+            "target": args.target, "chunk_id": args.chunk_id,
+            "db": None if args.db == DEFAULT_DB else args.db,
+        })
+        if status != 200 or "text" not in resp:
+            print(f"error: {resp.get('error', f'HTTP {status}')}", file=sys.stderr)
+            return 1
+        doc = resp
+    else:
+        try:
+            doc = Store(args.db).fulltext(target=args.target, chunk_id=args.chunk_id)
+        except (LookupError, FileNotFoundError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+    if doc.get("changed_since_ingest"):
+        print(f"warning: {doc['source_name']} changed since ingest; showing current file content",
+              file=sys.stderr)
+    if args.json:
+        print(json.dumps(doc, ensure_ascii=False, indent=2))
+    else:
+        print(doc["text"])
+    return 0
+
+
 def _print_search_results(results: list, as_json: bool) -> None:
     if as_json:
         print(json.dumps(results, ensure_ascii=False, indent=2))
@@ -190,6 +285,30 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--server", default=DEFAULT_SERVER, help="resident server URL (env RAG_SERVER); skips local model load")
     _add_common(p)
     p.set_defaults(func=cmd_search)
+
+    p = sub.add_parser("get", help="fetch one chunk by its chunk_id")
+    p.add_argument("chunk_id", type=int)
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--server", default=DEFAULT_SERVER, help="resident server URL (env RAG_SERVER); skips local model load")
+    _add_common(p)
+    p.set_defaults(func=cmd_get)
+
+    p = sub.add_parser("context", help="fetch a chunk plus its neighbors in the same document")
+    p.add_argument("chunk_id", type=int)
+    p.add_argument("--before", type=int, default=1, help="number of preceding chunks (default: 1)")
+    p.add_argument("--after", type=int, default=1, help="number of following chunks (default: 1)")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--server", default=DEFAULT_SERVER, help="resident server URL (env RAG_SERVER); skips local model load")
+    _add_common(p)
+    p.set_defaults(func=cmd_context)
+
+    p = sub.add_parser("fulltext", help="print the full text of a source document (re-read from disk)")
+    p.add_argument("target", nargs="?", help="document id, source path, or file name")
+    p.add_argument("--chunk-id", type=int, default=None, help="resolve the document via a chunk id")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--server", default=DEFAULT_SERVER, help="resident server URL (env RAG_SERVER); skips local model load")
+    _add_common(p)
+    p.set_defaults(func=cmd_fulltext)
 
     p = sub.add_parser("serve", help="run the resident server (model stays loaded)")
     p.add_argument("--host", default="127.0.0.1")
