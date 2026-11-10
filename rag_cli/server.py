@@ -137,6 +137,14 @@ class RagServer:
         }
 
 
+def _req_int(qs: dict, key: str) -> int:
+    raw = qs.get(key, [None])[0]
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"missing or invalid '{key}' parameter") from None
+
+
 def make_handler(rag: RagServer):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -170,7 +178,7 @@ def make_handler(rag: RagServer):
                     self._send(200, rag.list_documents(db))
                 elif url.path == "/chunk":
                     qs = parse_qs(url.query)
-                    chunk_id = int(qs["id"][0])
+                    chunk_id = _req_int(qs, "id")
                     chunk = rag.get_chunk(qs.get("db", [None])[0], chunk_id)
                     if chunk is None:
                         self._send(404, {"error": f"chunk not found: id={chunk_id}"})
@@ -190,7 +198,7 @@ def make_handler(rag: RagServer):
                         self._send(200, res)
                 elif url.path == "/context":
                     qs = parse_qs(url.query)
-                    chunk_id = int(qs["id"][0])
+                    chunk_id = _req_int(qs, "id")
                     ctx = rag.get_context(
                         qs.get("db", [None])[0], chunk_id,
                         before=int(qs.get("before", ["1"])[0]),
@@ -202,6 +210,8 @@ def make_handler(rag: RagServer):
                         self._send(200, ctx)
                 else:
                     self._send(404, {"error": "not found"})
+            except ValueError as e:  # bad input (bad path, bad params, backend mismatch...)
+                self._send(400, {"error": str(e)})
             except Exception as e:  # keep the server alive on a bad request
                 self._send(500, {"error": f"{type(e).__name__}: {e}"})
 
@@ -214,6 +224,8 @@ def make_handler(rag: RagServer):
                     self._send(200, rag.ingest(payload))
                 else:
                     self._send(404, {"error": "not found"})
+            except ValueError as e:
+                self._send(400, {"error": str(e)})
             except Exception as e:
                 self._send(500, {"error": f"{type(e).__name__}: {e}"})
 

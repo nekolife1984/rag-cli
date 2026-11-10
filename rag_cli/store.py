@@ -22,6 +22,20 @@ def _unpack(blob: bytes) -> list[float]:
     return list(struct.unpack(f"<{n}f", blob))
 
 
+def _chunk_dict(r) -> dict:
+    """Public chunk shape for get_chunk / get_context rows."""
+    return {
+        "chunk_id": r["id"],
+        "doc_id": r["doc_id"],
+        "source": r["source_path"],
+        "source_name": Path(r["source_path"]).name,
+        "chunk_index": r["chunk_index"],
+        "char_start": r["char_start"],
+        "char_end": r["char_end"],
+        "text": r["text"],
+    }
+
+
 class Store:
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -49,7 +63,7 @@ class Store:
         cur = self.conn.execute("SELECT key, value FROM meta WHERE key IN ('backend','dim')")
         meta = dict(cur.fetchall())
         if meta.get("backend") and (meta["backend"] != backend or int(meta["dim"]) != dim):
-            raise SystemExit(
+            raise ValueError(
                 f"DB backend mismatch: db={meta['backend']}({meta['dim']}d) vs requested={backend}({dim}d). "
                 "Use the same --backend as ingest, or use a different --db."
             )
@@ -109,34 +123,6 @@ class Store:
             out.append(d)
         return out
 
-    # --- search ---
-    def search(self, query_vec: list[float], top_k: int = 5, min_score: float | None = None):
-        rows = self.conn.execute(
-            """
-            SELECT c.id, c.chunk_index, c.text, c.char_start, c.char_end, c.embedding,
-                   d.source_path, d.source_name
-            FROM chunks c JOIN documents d ON d.id = c.doc_id
-            """
-        ).fetchall()
-        scored = []
-        for r in rows:
-            vec = _unpack(r["embedding"])
-            score = sum(a * b for a, b in zip(query_vec, vec))  # vectors are normalized
-            if min_score is not None and score < min_score:
-                continue
-            scored.append({
-                "chunk_id": r["id"],
-                "source": r["source_path"],
-                "source_name": r["source_name"],
-                "chunk_index": r["chunk_index"],
-                "char_start": r["char_start"],
-                "char_end": r["char_end"],
-                "score": round(float(score), 4),
-                "text": r["text"],
-            })
-        scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:top_k]
-
     # --- management ---
     def list_documents(self):
         return [dict(r) for r in self.conn.execute(
@@ -151,16 +137,7 @@ class Store:
         ).fetchone()
         if row is None:
             return None
-        return {
-            "chunk_id": row["id"],
-            "doc_id": row["doc_id"],
-            "source": row["source_path"],
-            "source_name": Path(row["source_path"]).name,
-            "chunk_index": row["chunk_index"],
-            "char_start": row["char_start"],
-            "char_end": row["char_end"],
-            "text": row["text"],
-        }
+        return _chunk_dict(row)
 
     def get_context(self, chunk_id: int, before: int = 1, after: int = 1):
         """Target chunk plus neighboring chunks from the SAME document.
@@ -178,11 +155,7 @@ class Store:
             "WHERE c.doc_id = ? AND c.chunk_index BETWEEN ? AND ? ORDER BY c.chunk_index",
             (doc_id, idx - max(0, before), idx + max(0, after)),
         ).fetchall()
-        chunks = [{
-            "chunk_id": r["id"], "doc_id": r["doc_id"], "source": r["source_path"],
-            "source_name": Path(r["source_path"]).name, "chunk_index": r["chunk_index"],
-            "char_start": r["char_start"], "char_end": r["char_end"], "text": r["text"],
-        } for r in rows]
+        chunks = [_chunk_dict(r) for r in rows]
         return {
             "target": target,
             "before": [c for c in chunks if c["chunk_index"] < idx],

@@ -17,21 +17,17 @@
 
 ## アーキテクチャ
 
-```
-ファイル ──ingest──▶ ローダ ─▶ チャンク分割 ─▶ 埋め込み ─▶ SQLite
-                                                              │
-クエリ ───────────────────────────── 埋め込み ─▶ コサイン類似度で検索
-                                                              │
-                                            ヒットしたチャンクのリスト
-```
+![rag-cli アーキテクチャ](docs/architecture.drawio.svg)
+
+この図は [draw.io / diagrams.net](https://app.diagrams.net) で編集できる drawio.svg です（SVG の中に図のモデルを埋め込んであります）。
 
 | モジュール | 役割 |
 |---|---|
-| `rag_cli/cli.py` | CLI 本体（ingest / search / list / stats / remove / clear / serve / mcp） |
+| `rag_cli/cli.py` | CLI 本体（ingest / search / get / context / fulltext / list / stats / remove / clear / serve / mcp） |
 | `rag_cli/loaders.py` | ファイル読み込み（txt / md / csv / json / html / docx / xlsx / xlsm、pdf は要 pypdf） |
 | `rag_cli/chunking.py` | 段落と Markdown 見出しを優先したチャンク分割 |
 | `rag_cli/embed.py` | 埋め込みバックエンド（hash / sbert / openai） |
-| `rag_cli/store.py` | SQLite への保存と総当たりコサイン検索 |
+| `rag_cli/store.py` | SQLite への保存とチャンク取得（検索の順位付けは hybrid.py） |
 | `rag_cli/hybrid.py` | BM25 キーワード検索と、ベクトル検索との RRF 融合 |
 | `rag_cli/server.py` | 常駐 HTTP サーバー（モデルをメモリに保持） |
 | `rag_cli/mcp_server.py` | MCP サーバー（stdio、JSON-RPC） |
@@ -257,8 +253,12 @@ rag-cli/
 │   ├── hybrid.py           # BM25 と RRF 融合
 │   ├── server.py           # 常駐 HTTP サーバー
 │   └── mcp_server.py       # MCP サーバー
+├── docs/
+│   └── architecture.drawio.svg  # アーキテクチャ図（draw.io で編集可能）
 ├── skills/
 │   └── rag-cli/SKILL.md    # AI エージェント向けスキル定義
+├── tests/
+│   └── test_core.py        # 単体テスト（unittest、標準ライブラリのみ）
 └── examples/
     ├── sample.md           # 動作確認用の架空のサンプル文書
     ├── compare_backends.py # バックエンド比較スクリプト
@@ -269,6 +269,9 @@ rag-cli/
 ## テスト
 
 ```bash
+# 単体テスト（標準ライブラリのみ、追加インストール不要）
+python3 -m unittest discover -s tests
+
 # スモークテスト（hash、追加インストール不要）
 python3 -m rag_cli ingest examples/sample.md --db /tmp/test.db --force
 python3 -m rag_cli search "体重の目標は何キロ？" --db /tmp/test.db

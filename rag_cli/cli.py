@@ -7,9 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from .chunking import chunk_text
 from .embed import get_backend
-from .loaders import iter_files, load_file
 from .store import Store
 
 DEFAULT_DB = os.environ.get("RAG_DB", "rag.db")
@@ -17,6 +15,7 @@ DEFAULT_SERVER = os.environ.get("RAG_SERVER")  # e.g. http://127.0.0.1:8765
 
 
 def _server_post(server: str, route: str, payload: dict) -> dict:
+    import urllib.error
     import urllib.request
 
     req = urllib.request.Request(
@@ -25,8 +24,14 @@ def _server_post(server: str, route: str, payload: dict) -> dict:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req) as resp:
-        return json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:  # server reports errors as JSON bodies
+        try:
+            return json.loads(e.read())
+        except Exception:
+            return {"error": f"HTTP {e.code}"}
 
 
 def _server_get(server: str, route: str, params: dict) -> tuple[int, dict]:
@@ -157,29 +162,19 @@ def cmd_ingest(args) -> int:
             print(f"{'skip' if f['skipped'] else 'ingested'}: {f['path']}  chunks={f['chunks']}")
         print(f"done: new_chunks={resp['total_chunks']} via server {args.server} (db: server default if --db omitted)")
         return 0
-    files = iter_files(args.paths, recursive=args.recursive)
-    if not files:
+    from .server import RagServer
+
+    rag = RagServer(args.backend, args.model, args.db)
+    resp = rag.ingest({
+        "paths": args.paths, "chunk_size": args.chunk_size, "overlap": args.overlap,
+        "force": args.force, "recursive": args.recursive,
+    })
+    if not resp["files"]:
         print("no supported files found", file=sys.stderr)
         return 1
-    backend = get_backend(args.backend, args.model)
-    store = Store(args.db)
-    store.ensure_backend(backend.name, backend.dim)
-    total_chunks = 0
-    for path in files:
-        file_hash = store.file_hash(path)
-        if not args.force and store.already_ingested(str(path.resolve()), file_hash):
-            print(f"skip (unchanged): {path}")
-            continue
-        text = load_file(path)
-        chunks = chunk_text(text, chunk_size=args.chunk_size, overlap=args.overlap)
-        if not chunks:
-            print(f"skip (empty): {path}")
-            continue
-        embeddings = backend.embed([c.text for c in chunks], is_query=False)
-        store.add_document(path, file_hash, chunks, embeddings)
-        total_chunks += len(chunks)
-        print(f"ingested: {path}  chunks={len(chunks)}")
-    print(f"done: files={len(files)} new_chunks={total_chunks} db={args.db} backend={backend.name}")
+    for f in resp["files"]:
+        print(f"{'skip' if f['skipped'] else 'ingested'}: {f['path']}  chunks={f['chunks']}")
+    print(f"done: files={len(resp['files'])} new_chunks={resp['total_chunks']} db={args.db} backend={rag.backend_name}")
     return 0
 
 
@@ -344,7 +339,11 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_clear)
 
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except ValueError as e:  # library code raises ValueError; CLI renders it
+        print(f"error: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

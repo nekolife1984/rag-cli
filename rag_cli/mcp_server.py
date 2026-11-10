@@ -28,7 +28,7 @@ import urllib.parse
 import urllib.request
 
 SUPPORTED_PROTOCOLS = ["2024-11-05", "2025-03-26", "2025-06-18"]
-SERVER_INFO = {"name": "rag-cli", "version": "0.3.4"}
+SERVER_INFO = {"name": "rag-cli", "version": "0.3.5"}
 
 TOOLS = [
     {

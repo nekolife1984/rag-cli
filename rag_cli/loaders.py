@@ -162,7 +162,7 @@ def _load_pdf(path: Path) -> str:
     try:
         from pypdf import PdfReader
     except ImportError as e:
-        raise SystemExit(f"PDF needs: pip install pypdf  ({path})") from e
+        raise ValueError(f"PDF needs: pip install pypdf  ({path})") from e
     reader = PdfReader(str(path))
     return "\n\n".join((page.extract_text() or "") for page in reader.pages)
 
@@ -176,7 +176,7 @@ def load_file(path: str | Path) -> str:
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix not in SUPPORTED:
-        raise SystemExit(f"unsupported file type: {suffix} ({path}) supported={sorted(SUPPORTED)}")
+        raise ValueError(f"unsupported file type: {suffix} ({path}) supported={sorted(SUPPORTED)}")
     if suffix in (".txt", ".md", ".markdown", ".csv", ".html", ".htm"):
         return _read_text_file(path)
     if suffix == ".json":
@@ -200,5 +200,5 @@ def iter_files(paths: list[str], recursive: bool = False) -> list[Path]:
         elif path.is_file():
             out.append(path)
         else:
-            raise SystemExit(f"not found: {p}")
+            raise ValueError(f"not found: {p}")
     return sorted(out)

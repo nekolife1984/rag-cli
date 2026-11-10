@@ -82,6 +82,8 @@ def run_search(store, query: str, query_vec: list[float] | None,
     rows = store.all_chunks()
     if not rows:
         return []
+    # shortcut: BM25 re-tokenizes every chunk on each query; fine up to ~10k
+    # chunks, cache the tokenized corpus (keyed by db state) beyond that.
     bm25 = bm25_scores([r["text"] for r in rows], query)
 
     vec_scores: list[float] | None = None

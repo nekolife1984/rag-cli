@@ -67,7 +67,7 @@ class SbertBackend:
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError as e:
-            raise SystemExit(
+            raise ValueError(
                 "sbert backend needs: pip install sentence-transformers\n"
                 "or use --backend hash / --backend openai"
             ) from e
@@ -93,7 +93,7 @@ class OpenAIBackend:
         self.model = model or os.environ.get("RAG_OPENAI_MODEL") or DEFAULT_OPENAI_MODEL
         self.api_key = os.environ.get("OPENAI_API_KEY")
         if not self.api_key:
-            raise SystemExit("openai backend needs env OPENAI_API_KEY")
+            raise ValueError("openai backend needs env OPENAI_API_KEY")
 
     def embed(self, texts: list[str], *, is_query: bool = False) -> list[list[float]]:
         import json
@@ -111,7 +111,7 @@ class OpenAIBackend:
                 },
                 method="POST",
             )
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=60) as resp:
                 data = json.loads(resp.read())
             out.extend(_normalize(list(map(float, d["embedding"]))) for d in data["data"])
         return out
@@ -124,4 +124,4 @@ def get_backend(name: str, model: str | None = None):
         return SbertBackend(model)
     if name == "openai":
         return OpenAIBackend(model)
-    raise SystemExit(f"unknown backend: {name} (choose: hash, sbert, openai)")
+    raise ValueError(f"unknown backend: {name} (choose: hash, sbert, openai)")
