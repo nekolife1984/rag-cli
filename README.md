@@ -172,6 +172,10 @@ mcp_servers:
       PYTHONPATH: /path/to/rag-cli
 ```
 
+### AI エージェント向けスキル
+
+AI エージェント（Claude 系など）にこのツールを使わせるためのスキル定義を [`skills/rag-cli/SKILL.md`](skills/rag-cli/SKILL.md) に同梱しています。検索モードの選び方、検索 → 前後取得 → 全文取得のワークフロー、スコアの解釈、取り込み時の注意点など、エージェントが迷わないための運用知識をまとめたものです。利用するエージェントのスキル置き場にコピーして使ってください。
+
 ## 埋め込みバックエンド
 
 | backend | 中身 | 意味検索 | 追加要件 |
@@ -253,6 +257,8 @@ rag-cli/
 │   ├── hybrid.py           # BM25 と RRF 融合
 │   ├── server.py           # 常駐 HTTP サーバー
 │   └── mcp_server.py       # MCP サーバー
+├── skills/
+│   └── rag-cli/SKILL.md    # AI エージェント向けスキル定義
 └── examples/
     ├── sample.md           # 動作確認用の架空のサンプル文書
     ├── compare_backends.py # バックエンド比較スクリプト
