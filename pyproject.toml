@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag-cli"
+version = "0.2.0"
+description = "Local RAG retrieval CLI: ingest files, search returns hit chunks only (no generation)"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+sbert = ["sentence-transformers"]
+pdf = ["pypdf"]
+all = ["sentence-transformers", "pypdf"]
+
+[project.scripts]
+rag = "rag_cli.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["rag_cli*"]

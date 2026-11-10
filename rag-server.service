@@ -1,0 +1,18 @@
+[Unit]
+Description=rag-cli resident search server (sbert model kept in memory)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/hatch/workspace/rag-cli
+ExecStart=/home/hatch/workspace/rag-cli/.venv/bin/python -m rag_cli serve --host 127.0.0.1 --port 8765 --db /home/hatch/workspace/rag-cli/sbert.db --backend sbert
+Environment=HOME=/home/hatch
+Environment=TMPDIR=/home/hatch/workspace/rag-cli/.tmp
+Environment=HF_HUB_OFFLINE=1
+Environment=TRANSFORMERS_OFFLINE=1
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
