@@ -39,17 +39,23 @@ class RagServer:
         return Store(db or self.default_db)
 
     def search(self, payload: dict) -> dict:
+        from .hybrid import run_search
+
         query = payload["query"]
+        mode = payload.get("mode", "hybrid")
         store = self._store(payload.get("db"))
         try:
-            with self.lock:
-                qv = self.backend.embed([query], is_query=True)[0]
-            results = store.search(
-                qv,
+            qv = None
+            if mode != "keyword":  # keyword mode needs no embedding model
+                with self.lock:
+                    qv = self.backend.embed([query], is_query=True)[0]
+            results = run_search(
+                store, query, qv,
                 top_k=int(payload.get("top_k", 5)),
+                mode=mode,
                 min_score=payload.get("min_score"),
             )
-            return {"results": results}
+            return {"results": results, "mode": mode}
         finally:
             store.conn.close()
 

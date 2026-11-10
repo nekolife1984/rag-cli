@@ -93,6 +93,22 @@ class Store:
         self.conn.commit()
         return doc_id
 
+    def all_chunks(self):
+        """All chunks with metadata and unpacked vectors (key `_vec`)."""
+        rows = self.conn.execute(
+            """
+            SELECT c.id, c.chunk_index, c.text, c.char_start, c.char_end, c.embedding,
+                   d.source_path, d.source_name
+            FROM chunks c JOIN documents d ON d.id = c.doc_id
+            """
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["_vec"] = _unpack(d.pop("embedding"))
+            out.append(d)
+        return out
+
     # --- search ---
     def search(self, query_vec: list[float], top_k: int = 5, min_score: float | None = None):
         rows = self.conn.execute(

@@ -91,21 +91,27 @@ def cmd_ingest(args) -> int:
 def cmd_search(args) -> int:
     if getattr(args, "server", None):
         resp = _server_post(args.server, "/search", {
-            "query": args.query, "db": None if args.db == DEFAULT_DB else args.db, "top_k": args.top_k, "min_score": args.min_score,
+            "query": args.query, "db": None if args.db == DEFAULT_DB else args.db,
+            "top_k": args.top_k, "min_score": args.min_score, "mode": args.mode,
         })
         if "error" in resp:
             print(f"server error: {resp['error']}", file=sys.stderr)
             return 1
         _print_search_results(resp["results"], args.json)
         return 0
-    backend = get_backend(args.backend, args.model)
+    from .hybrid import run_search
+
     store = Store(args.db)
-    info = store.backend_info()
-    if info.get("backend") and info["backend"] != backend.name:
-        print(f"warning: db backend={info['backend']} but requested {backend.name}; "
-              "results may be meaningless. Use the ingest backend.", file=sys.stderr)
-    query_vec = backend.embed([args.query], is_query=True)[0]
-    results = store.search(query_vec, top_k=args.top_k, min_score=args.min_score)
+    query_vec = None
+    if args.mode != "keyword":  # keyword mode needs no embedding backend at all
+        backend = get_backend(args.backend, args.model)
+        info = store.backend_info()
+        if info.get("backend") and info["backend"] != backend.name:
+            print(f"warning: db backend={info['backend']} but requested {backend.name}; "
+                  "results may be meaningless. Use the ingest backend.", file=sys.stderr)
+        query_vec = backend.embed([args.query], is_query=True)[0]
+    results = run_search(store, args.query, query_vec, top_k=args.top_k,
+                         mode=args.mode, min_score=args.min_score)
     _print_search_results(results, args.json)
     return 0
 
@@ -178,6 +184,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("query")
     p.add_argument("-k", "--top-k", type=int, default=5)
     p.add_argument("--min-score", type=float, default=None)
+    p.add_argument("--mode", choices=["vector", "keyword", "hybrid"], default="hybrid",
+                   help="search mode: vector=embedding only, keyword=BM25 only, hybrid=RRF fusion (default: hybrid)")
     p.add_argument("--json", action="store_true")
     p.add_argument("--server", default=DEFAULT_SERVER, help="resident server URL (env RAG_SERVER); skips local model load")
     _add_common(p)

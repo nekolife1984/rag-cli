@@ -10,6 +10,7 @@
 - **生成なし・検索専用**: 返すのはスコア付きのチャンク一覧のみ。出力は人間向けテキストと JSON の2形式
 - **依存が軽い**: コア（CLI・DB・MCP）は Python 標準ライブラリのみで動作する
 - **埋め込みは3方式から選択**: オフラインで即動く `hash`、意味検索の `sbert`、API の `openai`
+- **ハイブリッド検索**: ベクトル検索と BM25 キーワード検索を RRF で融合するモードを用意。固有名詞や数値に強いキーワード検索と、言い換えに強いベクトル検索の弱点を補い合う
 - **3つの利用形態**: 単発 CLI / 常駐サーバー（HTTP）/ MCP サーバー（stdio）
 - **日本語対応**: チャンク分割と埋め込みのいずれも日本語文書を前提に調整している
 
@@ -30,6 +31,7 @@
 | `rag_cli/chunking.py` | 段落と Markdown 見出しを優先したチャンク分割 |
 | `rag_cli/embed.py` | 埋め込みバックエンド（hash / sbert / openai） |
 | `rag_cli/store.py` | SQLite への保存と総当たりコサイン検索 |
+| `rag_cli/hybrid.py` | BM25 キーワード検索と、ベクトル検索との RRF 融合 |
 | `rag_cli/server.py` | 常駐 HTTP サーバー（モデルをメモリに保持） |
 | `rag_cli/mcp_server.py` | MCP サーバー（stdio、JSON-RPC） |
 
@@ -70,17 +72,31 @@ python3 -m rag_cli clear --db ./test.db --yes
 | コマンド | 説明 |
 |---|---|
 | `ingest <file\|dir...>` | ファイルを取り込む。`-r` でフォルダを再帰処理。内容が同じファイルは自動でスキップし、変わっていれば差し替える（`--force` で強制再取り込み） |
-| `search "<query>"` | ヒットしたチャンクをスコア順に返す。`-k` 件数（既定5）、`--min-score` 下限、`--json` で JSON 出力 |
+| `search "<query>"` | ヒットしたチャンクをスコア順に返す。`-k` 件数（既定5）、`--min-score` 下限、`--mode` 検索モード、`--json` で JSON 出力 |
 | `list` | 登録済み文書の一覧 |
 | `stats` | 文書数・チャンク数・バックエンド・次元数 |
 | `remove <file>` | 指定した文書を DB から削除 |
 | `clear --yes` | DB の中身をすべて削除 |
+
+#### 検索モード
+
+| モード | 中身 | 向いているクエリ |
+|---|---|---|
+| `vector` | 埋め込みのコサイン類似度のみ | 言い換え、意味の近い表現 |
+| `keyword` | BM25 のみ（埋め込みモデル不要で高速） | 固有名詞、型番、日付、数値などの完全一致寄りの語 |
+| `hybrid`（既定） | 両方のランキングを RRF（Reciprocal Rank Fusion、k=60）で融合 | 両方の性質が混ざったクエリ全般 |
+
+- 融合に順位ベースの RRF を使うため、方式ごとに水準が違うスコア同士を調整なしに組み合わせられる
+- 結果には統合後の `score` のほかに、内訳として `vector_score` と `keyword_score` が付く（hybrid の `score` は RRF スコアであり、他モードと絶対値を比較できない）
+- BM25 の日本語トークン化は文字バイグラム＋英数トークン。ひらがなだけの断片（「して」「てい」等）しか一致しないチャンクはキーワードヒットとして扱わない
+- `--min-score` は vector ではコサイン、keyword では BM25 スコアへの下限として働き、hybrid では使われない
 
 検索結果（JSON）の形式:
 
 ```json
 [{"chunk_id": 2, "source": "/path/to/sample.md", "source_name": "sample.md",
   "chunk_index": 1, "char_start": 61, "char_end": 164, "score": 0.8713,
+  "vector_score": 0.8713, "keyword_score": 13.3045,
   "text": "## 渓谷観光列車の予約について\n\n渓谷を走る観光列車は、川沿いの景色を楽しめる人気の列車である。…"}]
 ```
 
@@ -103,7 +119,7 @@ export RAG_SERVER=http://127.0.0.1:8765   # 設定すると --server を省略�
 | `GET /health` | 稼働状態、バックエンド、次元数、既定 DB |
 | `GET /stats?db=` | DB の統計 |
 | `GET /list?db=` | 登録済み文書の一覧 |
-| `POST /search` | `{"query", "db?", "top_k?", "min_score?"}` → `{"results": [...]}` |
+| `POST /search` | `{"query", "db?", "top_k?", "min_score?", "mode?"}` → `{"results": [...], "mode": "..."}` |
 | `POST /ingest` | `{"paths", "db?", "chunk_size?", "overlap?", "force?", "recursive?"}` |
 
 - バインドは 127.0.0.1 のみ、認証なし。ローカル専用であり、外部には公開しないこと
@@ -115,7 +131,7 @@ export RAG_SERVER=http://127.0.0.1:8765   # 設定すると --server を省略�
 
 | ツール | 引数 | 返り値 |
 |---|---|---|
-| `rag_search` | `query`, `top_k?`, `min_score?`, `db?` | ヒットしたチャンクのリスト |
+| `rag_search` | `query`, `top_k?`, `min_score?`, `mode?`, `db?` | ヒットしたチャンクのリスト |
 | `rag_ingest` | `paths`, `db?`, `chunk_size?`, `overlap?`, `force?`, `recursive?` | ファイルごとの取り込み結果 |
 | `rag_list` | `db?` | 登録済み文書の一覧 |
 | `rag_stats` | `db?` | DB の統計 |
@@ -188,6 +204,15 @@ uv pip install --python .venv/bin/python --torch-backend cpu sentence-transforme
 
 言い換えクエリの例: 「ネットワークストレージの冷却装置が止まった時の対処法」では、本文に該当語を含まない NAS ファン警告のチャンクを、sbert は1位（0.870）で返し、hash は外した。
 
+検索モード比較（サンプル文書5チャンク、完全一致寄り4問＋言い換え4問＋混合2問の10問で1位正解率を測定。再現手順は `examples/compare_modes.py`）:
+
+| バックエンド | vector | keyword | hybrid |
+|---|---|---|---|
+| sbert | 10/10 | 9/10 | 10/10 |
+| hash | 8/10 | 9/10 | 9/10 |
+
+ハイブリッドはどちらのバックエンドでも単独方式の最良と同等以上になった。たとえば hash ではベクトル単独が外した言い換えクエリをキーワード側が拾って正解に届いている。ただし対象が5チャンクの小規模サンプルであり、実文書での優劣はコーパスの規模やクエリの性質に依存する。
+
 応答時間とリソース（小規模 VM での参考値）:
 
 | 形態 | 検索1回 |
@@ -215,11 +240,13 @@ rag-cli/
 │   ├── chunking.py         # チャンク分割
 │   ├── embed.py            # 埋め込みバックエンド
 │   ├── store.py            # SQLite 保存・検索
+│   ├── hybrid.py           # BM25 と RRF 融合
 │   ├── server.py           # 常駐 HTTP サーバー
 │   └── mcp_server.py       # MCP サーバー
 └── examples/
     ├── sample.md           # 動作確認用の架空のサンプル文書
     ├── compare_backends.py # バックエンド比較スクリプト
+    ├── compare_modes.py    # 検索モード比較スクリプト
     └── mcp_test.py         # MCP クライアントのテストスクリプト
 ```
 

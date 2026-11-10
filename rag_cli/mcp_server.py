@@ -25,7 +25,7 @@ import urllib.parse
 import urllib.request
 
 SUPPORTED_PROTOCOLS = ["2024-11-05", "2025-03-26", "2025-06-18"]
-SERVER_INFO = {"name": "rag-cli", "version": "0.2.0"}
+SERVER_INFO = {"name": "rag-cli", "version": "0.3.0"}
 
 TOOLS = [
     {
@@ -37,7 +37,9 @@ TOOLS = [
             "properties": {
                 "query": {"type": "string", "description": "Search query (any language)"},
                 "top_k": {"type": "integer", "default": 5, "minimum": 1, "maximum": 50},
-                "min_score": {"type": "number", "description": "Optional minimum cosine score"},
+                "min_score": {"type": "number", "description": "Optional minimum score (vector: cosine, keyword: BM25; ignored in hybrid)"},
+                "mode": {"type": "string", "enum": ["vector", "keyword", "hybrid"], "default": "hybrid",
+                         "description": "vector=embedding only, keyword=BM25 only, hybrid=RRF fusion of both"},
                 "db": {"type": "string", "description": "Optional DB path (default: server default DB)"},
             },
             "required": ["query"],
@@ -103,6 +105,7 @@ class BridgeOps:
         return self._post("/search", {
             "query": args["query"], "db": args.get("db"),
             "top_k": args.get("top_k", 5), "min_score": args.get("min_score"),
+            "mode": args.get("mode", "hybrid"),
         })
 
     def ingest(self, args: dict) -> dict:
@@ -130,6 +133,7 @@ class DirectOps:
         return self.rag.search({
             "query": args["query"], "db": args.get("db"),
             "top_k": args.get("top_k", 5), "min_score": args.get("min_score"),
+            "mode": args.get("mode", "hybrid"),
         })
 
     def ingest(self, args: dict) -> dict:
